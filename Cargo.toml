@@ -1,0 +1,15 @@
+[package]
+name = "superdev-assigment"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+actix-web = "4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+solana-sdk = "1.18"
+spl-token = "4.0"
+bs58 = "0.4"
+base64 = "0.21"
+ed25519-dalek = "1.0"
+rand = "0.7"
