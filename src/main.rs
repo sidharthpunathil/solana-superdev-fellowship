@@ -416,7 +416,32 @@ async fn message_sign(req: web::Json<MessageSignRequest>) -> impl Responder {
     })
 }
 
-async fn message_verify(req: web::Json<MessageVerifyRequest>) -> impl Responder {
+async fn message_verify(payload: web::Bytes) -> impl Responder {
+    let value: serde_json::Value = match serde_json::from_slice(&payload) {
+        Ok(v) => v,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                success: false,
+                error: "Invalid request format".to_string(),
+            });
+        }
+    };
+    // Check required fields
+    if !value.get("message").is_some() || !value.get("signature").is_some() || !value.get("pubkey").is_some() {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            success: false,
+            error: "Missing required fields".to_string(),
+        });
+    }
+    let req: MessageVerifyRequest = match serde_json::from_value(value) {
+        Ok(r) => r,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                success: false,
+                error: "Invalid request format".to_string(),
+            });
+        }
+    };
     // Decode public key from base58
     let pubkey_bytes = match bs58::decode(&req.pubkey).into_vec() {
         Ok(bytes) => bytes,
@@ -530,7 +555,32 @@ async fn send_sol(req: web::Json<SendSolRequest>) -> impl Responder {
     })
 }
 
-async fn send_token(req: web::Json<SendTokenRequest>) -> impl Responder {
+async fn send_token(payload: web::Bytes) -> impl Responder {
+    let value: serde_json::Value = match serde_json::from_slice(&payload) {
+        Ok(v) => v,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                success: false,
+                error: "Invalid request format".to_string(),
+            });
+        }
+    };
+    // Check required fields
+    if !value.get("destination").is_some() || !value.get("mint").is_some() || !value.get("owner").is_some() || !value.get("amount").is_some() {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            success: false,
+            error: "Missing required fields".to_string(),
+        });
+    }
+    let req: SendTokenRequest = match serde_json::from_value(value) {
+        Ok(r) => r,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                success: false,
+                error: "Invalid request format".to_string(),
+            });
+        }
+    };
     // Validate base58 addresses
     let destination_pubkey = match bs58::decode(&req.destination).into_vec() {
         Ok(bytes) => match Pubkey::try_from(bytes.as_slice()) {
@@ -602,7 +652,7 @@ async fn send_token(req: web::Json<SendTokenRequest>) -> impl Responder {
         }
     };
 
-    // Prepare accounts (only pubkey and isSigner)
+    // Prepare accounts (only pubkey and is_signer)
     let accounts: Vec<SendTokenAccountMeta> = ix.accounts.iter().map(|meta| SendTokenAccountMeta {
         pubkey: meta.pubkey.to_string(),
         is_signer: meta.is_signer,
