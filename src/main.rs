@@ -12,6 +12,9 @@ use actix_web::dev::Payload;
 use actix_web::http::StatusCode;
 use actix_web::FromRequest;
 use futures_util::future::{ready, Ready};
+use std::future::Future;
+use std::pin::Pin;
+use serde::de::DeserializeOwned;
 
 #[derive(Serialize)]
 struct SuccessResponse<T> {
@@ -141,6 +144,34 @@ struct SendTokenResponse {
     instruction_data: String,
 }
 
+// Custom extractor for consistent error responses on deserialization failure
+pub struct MyJson<T>(pub T);
+
+impl<T> FromRequest for MyJson<T>
+where
+    T: DeserializeOwned + 'static,
+{
+    type Error = actix_web::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
+
+    fn from_request(req: &actix_web::HttpRequest, payload: &mut Payload) -> Self::Future {
+        let fut = web::Json::<T>::from_request(req, payload);
+        Box::pin(async move {
+            match fut.await {
+                Ok(json) => Ok(MyJson(json.into_inner())),
+                Err(_) => {
+                    let err = ErrorResponse {
+                        success: false,
+                        error: "Invalid request format or missing required fields".to_string(),
+                    };
+                    let resp = HttpResponse::BadRequest().json(err);
+                    Err(actix_web::error::InternalError::from_response("", resp).into())
+                }
+            }
+        })
+    }
+}
+
 async fn health() -> impl Responder {
     HttpResponse::Ok().json(SuccessResponse {
         success: true,
@@ -267,7 +298,8 @@ async fn token_create(payload: web::Bytes) -> impl Responder {
     })
 }
 
-async fn token_mint(req: web::Json<TokenMintRequest>) -> impl Responder {
+async fn token_mint(req: MyJson<TokenMintRequest>) -> impl Responder {
+    let req = req.0;
     // Parse base58 pubkeys
     let mint_pubkey = match bs58::decode(&req.mint).into_vec() {
         Ok(bytes) => match Pubkey::try_from(bytes.as_slice()) {
@@ -359,7 +391,8 @@ async fn token_mint(req: web::Json<TokenMintRequest>) -> impl Responder {
     })
 }
 
-async fn message_sign(req: web::Json<MessageSignRequest>) -> impl Responder {
+async fn message_sign(req: MyJson<MessageSignRequest>) -> impl Responder {
+    let req = req.0;
     if req.message.is_empty() || req.secret.is_empty() {
         return HttpResponse::BadRequest().json(ErrorResponse {
             success: false,
@@ -495,7 +528,8 @@ async fn message_verify(payload: web::Bytes) -> impl Responder {
     })
 }
 
-async fn send_sol(req: web::Json<SendSolRequest>) -> impl Responder {
+async fn send_sol(req: MyJson<SendSolRequest>) -> impl Responder {
+    let req = req.0;
     // Validate base58 addresses
     let from_pubkey = match bs58::decode(&req.from).into_vec() {
         Ok(bytes) => match Pubkey::try_from(bytes.as_slice()) {
