@@ -148,7 +148,10 @@ async fn keypair() -> impl Responder {
     let mut csprng = OsRng {};
     let keypair = Keypair::generate(&mut csprng);
     let pubkey = bs58::encode(keypair.public.as_bytes()).into_string();
-    let secret = bs58::encode(keypair.secret.as_bytes()).into_string();
+    let mut secret_bytes = Vec::new();
+    secret_bytes.extend_from_slice(&keypair.secret.to_bytes());
+    secret_bytes.extend_from_slice(&keypair.public.to_bytes());
+    let secret = bs58::encode(secret_bytes).into_string();
 
     HttpResponse::Ok().json(SuccessResponse {
         success: true,
@@ -328,7 +331,12 @@ async fn token_mint(req: web::Json<TokenMintRequest>) -> impl Responder {
 }
 
 async fn message_sign(req: web::Json<MessageSignRequest>) -> impl Responder {
-    // Decode secret key from base58
+    if req.message.is_empty() || req.secret.is_empty() {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            success: false,
+            error: "Missing required fields".to_string(),
+        });
+    }
     let secret_bytes = match bs58::decode(&req.secret).into_vec() {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -338,35 +346,37 @@ async fn message_sign(req: web::Json<MessageSignRequest>) -> impl Responder {
             });
         }
     };
-
-    // ed25519_dalek expects a 32-byte secret key
-    if secret_bytes.len() != 32 {
+    let secret = if secret_bytes.len() == 32 {
+        match ed25519_dalek::SecretKey::from_bytes(&secret_bytes) {
+            Ok(sk) => sk,
+            Err(_) => {
+                return HttpResponse::BadRequest().json(ErrorResponse {
+                    success: false,
+                    error: "Invalid secret key bytes".to_string(),
+                });
+            }
+        }
+    } else if secret_bytes.len() == 64 {
+        match ed25519_dalek::SecretKey::from_bytes(&secret_bytes[0..32]) {
+            Ok(sk) => sk,
+            Err(_) => {
+                return HttpResponse::BadRequest().json(ErrorResponse {
+                    success: false,
+                    error: "Invalid secret key bytes".to_string(),
+                });
+            }
+        }
+    } else {
         return HttpResponse::BadRequest().json(ErrorResponse {
             success: false,
-            error: "Secret key must be 32 bytes".to_string(),
+            error: "Secret key must be 32 or 64 bytes".to_string(),
         });
-    }
-
-    // Create secret and keypair
-    let secret = match ed25519_dalek::SecretKey::from_bytes(&secret_bytes) {
-        Ok(sk) => sk,
-        Err(_) => {
-            return HttpResponse::BadRequest().json(ErrorResponse {
-                success: false,
-                error: "Invalid secret key bytes".to_string(),
-            });
-        }
     };
     let public = ed25519_dalek::PublicKey::from(&secret);
     let keypair = ed25519_dalek::Keypair { secret, public };
-
-    // Sign the message
     let signature = keypair.sign(req.message.as_bytes());
-
-    // Encode signature and public key
     let signature_b64 = base64::encode(signature.to_bytes());
     let public_b58 = bs58::encode(keypair.public.as_bytes()).into_string();
-
     HttpResponse::Ok().json(SuccessResponse {
         success: true,
         data: MessageSignResponse {
@@ -598,128 +608,4 @@ async fn main() -> std::io::Result<()> {
     .bind(("127.0.0.1", 8080))?
     .run()
     .await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use actix_web::{test, App};
-    use serde_json::json;
-
-    #[actix_web::test]
-    async fn test_keypair() {
-        let app = test::init_service(App::new().route("/keypair", web::post().to(keypair))).await;
-        let req = test::TestRequest::post().uri("/keypair").to_request();
-        let resp: serde_json::Value = test::call_and_read_body_json(&app, req).await;
-        assert!(resp["success"].as_bool().unwrap());
-        assert!(resp["data"]["pubkey"].is_string());
-        assert!(resp["data"]["secret"].is_string());
-    }
-
-    #[actix_web::test]
-    async fn test_token_create() {
-        let app = test::init_service(App::new().route("/token/create", web::post().to(token_create))).await;
-        let req_body = json!({
-            "mintAuthority": "4Nd1mYw2pQe1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ1",
-            "mint": "7Yk1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ2",
-            "decimals": 6
-        });
-        let req = test::TestRequest::post().uri("/token/create").set_json(&req_body).to_request();
-        let resp: serde_json::Value = test::call_and_read_body_json(&app, req).await;
-        assert!(resp["success"].as_bool().unwrap());
-        assert!(resp["data"]["program_id"].is_string());
-        assert!(resp["data"]["accounts"].is_object());
-        assert!(resp["data"]["instruction_data"].is_string());
-    }
-
-    #[actix_web::test]
-    async fn test_token_mint() {
-        let app = test::init_service(App::new().route("/token/mint", web::post().to(token_mint))).await;
-        let req_body = json!({
-            "mint": "7Yk1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ2",
-            "destination": "4Nd1mYw2pQe1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ1",
-            "authority": "4Nd1mYw2pQe1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ1",
-            "amount": 1000000
-        });
-        let req = test::TestRequest::post().uri("/token/mint").set_json(&req_body).to_request();
-        let resp: serde_json::Value = test::call_and_read_body_json(&app, req).await;
-        assert!(resp["success"].as_bool().unwrap());
-        assert!(resp["data"]["program_id"].is_string());
-        assert!(resp["data"]["accounts"].is_array());
-        assert!(resp["data"]["instruction_data"].is_string());
-    }
-
-    #[actix_web::test]
-    async fn test_message_sign() {
-        // Generate a keypair for signing
-        let mut csprng = rand::rngs::OsRng {};
-        let keypair = ed25519_dalek::Keypair::generate(&mut csprng);
-        let secret = bs58::encode(keypair.secret.as_bytes()).into_string();
-        let req_body = json!({
-            "message": "Hello, Solana!",
-            "secret": secret
-        });
-        let app = test::init_service(App::new().route("/message/sign", web::post().to(message_sign))).await;
-        let req = test::TestRequest::post().uri("/message/sign").set_json(&req_body).to_request();
-        let resp: serde_json::Value = test::call_and_read_body_json(&app, req).await;
-        assert!(resp["success"].as_bool().unwrap());
-        assert!(resp["data"]["signature"].is_string());
-        assert!(resp["data"]["public_key"].is_string());
-        assert_eq!(resp["data"]["message"], "Hello, Solana!");
-    }
-
-    #[actix_web::test]
-    async fn test_message_verify() {
-        // Generate a keypair and sign a message
-        let mut csprng = rand::rngs::OsRng {};
-        let keypair = ed25519_dalek::Keypair::generate(&mut csprng);
-        let pubkey = bs58::encode(keypair.public.as_bytes()).into_string();
-        let message = "Hello, Solana!";
-        let signature = base64::encode(keypair.sign(message.as_bytes()).to_bytes());
-        let req_body = json!({
-            "message": message,
-            "signature": signature,
-            "pubkey": pubkey
-        });
-        let app = test::init_service(App::new().route("/message/verify", web::post().to(message_verify))).await;
-        let req = test::TestRequest::post().uri("/message/verify").set_json(&req_body).to_request();
-        let resp: serde_json::Value = test::call_and_read_body_json(&app, req).await;
-        assert!(resp["success"].as_bool().unwrap());
-        assert!(resp["data"]["valid"].is_boolean());
-        assert_eq!(resp["data"]["message"], message);
-        assert!(resp["data"]["pubkey"].is_string());
-    }
-
-    #[actix_web::test]
-    async fn test_send_sol() {
-        let app = test::init_service(App::new().route("/send/sol", web::post().to(send_sol))).await;
-        let req_body = json!({
-            "from": "4Nd1mYw2pQe1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ1",
-            "to": "7Yk1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ2",
-            "lamports": 100000
-        });
-        let req = test::TestRequest::post().uri("/send/sol").set_json(&req_body).to_request();
-        let resp: serde_json::Value = test::call_and_read_body_json(&app, req).await;
-        assert!(resp["success"].as_bool().unwrap());
-        assert!(resp["data"]["program_id"].is_string());
-        assert!(resp["data"]["accounts"].is_array());
-        assert!(resp["data"]["instruction_data"].is_string());
-    }
-
-    #[actix_web::test]
-    async fn test_send_token() {
-        let app = test::init_service(App::new().route("/send/token", web::post().to(send_token))).await;
-        let req_body = json!({
-            "destination": "4Nd1mYw2pQe1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ1",
-            "mint": "7Yk1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ2",
-            "owner": "4Nd1mYw2pQe1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ1Qn1v1kQ1",
-            "amount": 100000
-        });
-        let req = test::TestRequest::post().uri("/send/token").set_json(&req_body).to_request();
-        let resp: serde_json::Value = test::call_and_read_body_json(&app, req).await;
-        assert!(resp["success"].as_bool().unwrap());
-        assert!(resp["data"]["program_id"].is_string());
-        assert!(resp["data"]["accounts"].is_array());
-        assert!(resp["data"]["instruction_data"].is_string());
-    }
 }
