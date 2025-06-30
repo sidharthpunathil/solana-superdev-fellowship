@@ -1,4 +1,4 @@
-use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{web, App, HttpResponse, HttpServer, Responder, Error};
 use serde::{Deserialize, Serialize};
 use ed25519_dalek::Keypair;
 use rand::rngs::OsRng;
@@ -8,6 +8,10 @@ use solana_sdk::pubkey::Pubkey;
 use spl_token::instruction::initialize_mint;
 use ed25519_dalek::Signer;
 use ed25519_dalek::Verifier;
+use actix_web::dev::Payload;
+use actix_web::http::StatusCode;
+use actix_web::FromRequest;
+use futures_util::future::{ready, Ready};
 
 #[derive(Serialize)]
 struct SuccessResponse<T> {
@@ -37,9 +41,9 @@ struct TokenCreateRequest {
 #[derive(Serialize, Clone)]
 struct TokenAccountMeta {
     pubkey: String,
-    #[serde(rename = "isSigner")]
+    #[serde(rename = "is_signer")]
     is_signer: bool,
-    #[serde(rename = "isWritable")]
+    #[serde(rename = "is_writable")]
     is_writable: bool,
 }
 
@@ -61,9 +65,9 @@ struct TokenMintRequest {
 #[derive(Serialize)]
 struct TokenMintAccountMeta {
     pubkey: String,
-    #[serde(rename = "isSigner")]
+    #[serde(rename = "is_signer")]
     is_signer: bool,
-    #[serde(rename = "isWritable")]
+    #[serde(rename = "is_writable")]
     is_writable: bool,
 }
 
@@ -126,7 +130,7 @@ struct SendTokenRequest {
 #[derive(Serialize)]
 struct SendTokenAccountMeta {
     pubkey: String,
-    #[serde(rename = "isSigner")]
+    #[serde(rename = "is_signer")]
     is_signer: bool,
 }
 
@@ -159,7 +163,32 @@ async fn keypair() -> impl Responder {
     })
 }
 
-async fn token_create(req: web::Json<TokenCreateRequest>) -> impl Responder {
+async fn token_create(payload: web::Bytes) -> impl Responder {
+    let value: serde_json::Value = match serde_json::from_slice(&payload) {
+        Ok(v) => v,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                success: false,
+                error: "Invalid request format".to_string(),
+            });
+        }
+    };
+    // Check required fields
+    if !value.get("mintAuthority").is_some() || !value.get("mint").is_some() || !value.get("decimals").is_some() {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            success: false,
+            error: "Missing required fields".to_string(),
+        });
+    }
+    let req: TokenCreateRequest = match serde_json::from_value(value) {
+        Ok(r) => r,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                success: false,
+                error: "Invalid request format".to_string(),
+            });
+        }
+    };
     // Parse base58 pubkeys
     let mint_pubkey = match bs58::decode(&req.mint).into_vec() {
         Ok(bytes) => match Pubkey::try_from(bytes.as_slice()) {
